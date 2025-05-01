@@ -1,0 +1,391 @@
+#!/usr/bin/env python3
+#
+#  Wildcard-plugin to monitor gpsd attribute values.
+#
+#  To monitor gpsd, link gpsd_<aspect> to this file, where <aspect> is one of
+#  sat, fix, pos, alt, mov, trk, err, snr, az, el
+#
+#  Requires the GPSD Python client library to be available.
+#
+#  Releases:
+#
+#    2025-04-30 - Initial
+#    2025-05-02 - Added SNR graph
+#    2025-05-03 - Added azimuth and elevation graphs
+#    2025-05-05 - Refactored and added type declarations
+#
+#
+#  Copyright (c) 2025 Terry Burton <tez@terryburton.co.uk>
+#
+#  Licensed under the Apache License, Version 2.0 (the "License"); you may not
+#  use this file except in compliance with the License.  You may obtain a copy
+#  of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+#  WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+#  License for the specific language governing permissions and limitations
+#  under the License.
+#
+#
+#  Magic markers
+#   #%# capabilities=autoconf suggest
+#   #%# family=auto
+#
+
+import os
+import stat
+import sys
+import pickle
+import time
+import re
+from typing import Any, Dict, List, Optional, Set, Tuple, Union, cast
+from gps import gps, WATCH_ENABLE, WATCH_NEWSTYLE  # type: ignore
+
+
+#
+#  Type aliases
+#
+
+ConfigFieldList = List[Tuple[str, str, str]]
+TPVConfig = Dict[str, Union[str, ConfigFieldList]]
+SKYConfig = Dict[str, Union[str, ConfigFieldList]]
+SkyConfig = Dict[str, str]
+GPSData = Dict[str, Any]
+
+
+#
+#  Consts
+#
+
+ID_MAP: Dict[int, str] = { 0: 'GP', 1: 'SB', 2: 'GA', 3: 'BD', 4: 'IM', 5: 'QZ', 6: 'GL', 7: 'IR' }
+
+TPV_ASPECTS: Dict[str, TPVConfig] = {
+    'sat': {
+        'title':  'gpsd: Satellites',
+        'vlabel': 'Number of satellites',
+        'args':   '--base 1000 --lower-limit 0',
+        'fields': [('seen', 'Seen', 'AREA'), ('used', 'Used', 'AREA')],
+    },
+    'fix': {
+        'title':  'gpsd: Fix mode',
+        'vlabel': 'Mode',
+        'args':   '--base 1000 --lower-limit 0',
+        'fields': [('mode', 'Fix mode (1 = No fix; 2 = 2D; 3 = 3D)', 'AREA')],
+    },
+    'pos': {
+        'title':  'gpsd: Location',
+        'vlabel': 'Lat/lon (degrees)',
+        'args':   '--base 1000 --lower-limit -180 --upper-limit 180 --rigid',
+        'fields': [('lat', 'Latitude', 'LINE1'), ('lon', 'Longitude', 'LINE1')],
+    },
+    'alt': {
+        'title':  'gpsd: Altitude',
+        'vlabel': 'Altitude (m)',
+        'args':   '--base 1000',
+        'fields': [('alt', 'Altitude', 'LINE1')],
+    },
+    'mov': {
+        'title':  'gpsd: Movement',
+        'vlabel': 'Rate (m/s)',
+        'args':   '--base 1000',
+        'fields': [('speed', 'Speed', 'LINE1'), ('climb', 'Climb', 'LINE1')],
+    },
+    'trk': {
+        'title':  'gpsd: Track',
+        'vlabel': 'Heading (degrees)',
+        'args':   '--base 1000 --lower-limit 0 --upper-limit 360 --rigid',
+        'fields': [('track', 'Track', 'LINE1')],
+    },
+    'err': {
+        'title':  'gpsd: Errors',
+        'vlabel': 'Error',
+        'args':   '--base 1000 --lower-limit 0',
+        'fields': [
+            ('epy', 'Latitude error (m)', 'LINE1'),
+            ('epx', 'Longitude error (m)', 'LINE1'),
+            ('eps', 'Speed error (m)', 'LINE1'),
+            ('epv', 'Climb error (m)', 'LINE1'),
+        ],
+    },
+}
+
+SKY_ASPECTS: Dict[str, SKYConfig] = {
+    'dop': {
+        'title':  'gpsd: Dilution of precision',
+        'vlabel': 'Dilution of precision',
+        'args':   '--base 1000 --lower-limit 0',
+        'fields': [
+            ('ydop', 'Latitudinal', 'LINE1'),
+            ('xdop', 'Longitudinal', 'LINE1'),
+            ('hdop', 'Horizontal', 'LINE1'),
+            ('vdop', 'Vertical', 'LINE1'),
+            ('pdop', 'Positional', 'LINE1'),
+            ('tdop', 'Time', 'LINE1'),
+            ('gdop', 'Geometric', 'LINE1'),
+        ],
+    },
+}
+
+SAT_ASPECTS: Dict[str, SkyConfig] = {
+    'snr': {
+        'title':  'gpsd: Signal to Noise',
+        'vlabel': 'SNR',
+        'args':   '--base 1000 --lower-limit 0',
+        'item':   'ss',
+    },
+    'az': {
+        'title':  'gpsd: Azimuth',
+        'vlabel': 'Azimuth (degrees)',
+        'args':   '--base 1000 --lower-limit 0 --upper-limit 360 --rigid',
+        'item':   'az',
+    },
+    'el': {
+        'title':  'gpsd: Elevation',
+        'vlabel': 'Elevation (degrees)',
+        'args':   '--base 1000 --lower-limit 0 --upper-limit 90 --rigid',
+        'item':   'el',
+    },
+}
+
+TPV_FIELDS: List[str] = [ f for cfg in TPV_ASPECTS.values() for f, _, _ in cast(ConfigFieldList, cfg['fields']) if f not in ('seen', 'used') ]
+SKY_FIELDS: List[str] = [ f for cfg in SKY_ASPECTS.values() for f, _, _ in cast(ConfigFieldList, cfg['fields']) ]
+SAT_FIELDS: List[str] = [ cfg['item'] for cfg in SAT_ASPECTS.values() ]
+
+
+#
+#  Helpers
+#
+
+def log_error(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+#
+#  Generally gpsd will report data once per second
+#
+def read_gps(known_satellites: Set[str], timeout: float) -> Optional[GPSData]:
+    session = gps(mode=WATCH_ENABLE | WATCH_NEWSTYLE)
+    start_time: float = time.time()
+    data: GPSData = {}
+    sky_received: bool = False
+    tpv_received: bool = False
+
+    while time.time() - start_time < timeout:
+        try:
+            report: Dict[str, Any] = session.next()
+
+            if report['class'] == 'TPV':
+                for field in TPV_FIELDS:
+                    data[field] = getattr(report, field, None)
+                tpv_received = True
+
+            elif report['class'] == 'SKY':
+                if hasattr(report, 'satellites'):
+                    data['seen'] = data['used'] = 0
+                    for field in SKY_FIELDS:
+                        data[field] = getattr(report, field, None)
+                    for field in SAT_FIELDS:
+                        data[field] = { sat: "U" for sat in known_satellites or [] }
+                    for sat in report.satellites:
+                        data['seen'] += 1
+                        data['used'] += 1 if getattr(sat, 'used', False) else 0
+                        gnssid: Optional[int] = getattr(sat, 'gnssid', None)
+                        svid: Optional[int] = getattr(sat, 'svid', None)
+                        if gnssid is not None and svid is not None:
+                            id: str = ID_MAP.get(gnssid, '_') + f" {svid}"
+                            for field in SAT_FIELDS:
+                                value: Optional[float] = getattr(sat, field, None)
+                                data[field][id] = value if value and value > 0 else "U"
+                sky_received = True
+
+            #
+            #  Return everything or nothing
+            #
+            if tpv_received and sky_received:
+                return data
+
+        except (StopIteration, KeyError):
+            pass
+        except Exception as e:
+            log_error(f"Error reading GPS data: {e}")
+            break
+
+        #
+        #  Don't busy wait
+        #
+        time.sleep(0.2)
+
+    #
+    #  Timed out
+    #
+    return None
+
+
+def read_cache(statefile: str) -> Optional[GPSData]:
+
+    #
+    #  Ignore existing state if it is missing or too old
+    #
+    if not os.path.isfile(statefile) or time.time() - os.stat(statefile)[stat.ST_MTIME] > 60:
+        return None
+
+    try:
+        with open(statefile, "rb") as fh:
+            return cast(GPSData, pickle.load(fh))
+    except Exception as e:
+        log_error(f"Error opening statefile '{statefile}': {e}")
+
+    return None
+
+
+def update_cache(statefile: str, data: GPSData) -> None:
+
+    try:
+        with open(statefile, "wb") as fh:
+            pickle.dump(data, fh)
+    except Exception as e:
+        log_error(f"Error updating statefile '{statefile}': {e}")
+
+
+def read_sats(satsfile: str) -> Optional[Set[str]]:
+
+    if not os.path.isfile(satsfile):
+        return set()
+
+    try:
+        with open(satsfile, "rb") as fh:
+            return cast(Set[str], pickle.load(fh))
+    except Exception as e:
+        log_error(f"Error opening satsfile '{satsfile}': {e}")
+
+    return None
+
+
+def update_sats(satsfile: str, sats: Set[str]) -> None:
+
+    try:
+        tmpfile: str = satsfile + ".tmp"
+        with open(tmpfile, "wb") as fh:
+            pickle.dump(sats, fh)
+        os.replace(tmpfile, satsfile)
+    except Exception as e:
+        log_error(f"Error updating satsfile '{satsfile}': {e}")
+
+
+def get_gps_data(statefile: Optional[str], satsfile: Optional[str], timeout: float) -> Optional[GPSData]:
+
+    data: Optional[GPSData] = None
+    if statefile:
+        data = read_cache(statefile)
+        if data:
+            return data;
+
+    known_satellites: Optional[Set[str]] = read_sats(satsfile) if satsfile else None
+
+    data = read_gps(known_satellites or set(), timeout)
+
+    if satsfile is not None and known_satellites is not None and data is not None:
+        known_satellites.update(data['ss'].keys())
+        update_sats(satsfile, known_satellites)
+
+    if statefile and data:
+        update_cache(statefile, data)
+
+    return data
+
+
+##########
+#  Main  #
+##########
+
+def main() -> None:
+
+    #
+    #  Environment
+    #
+    TIMEOUT: float = float(os.environ.get("GPSD_TIMEOUT", 2))
+    STATE_FILE_DIR: Optional[str] = os.environ.get('MUNIN_PLUGSTATE', None)
+    STATE_FILE: Optional[str] = os.path.join(STATE_FILE_DIR, "gpsd.state") if STATE_FILE_DIR else None
+    SATS_FILE: Optional[str] = os.path.join(STATE_FILE_DIR, "gpsd_sats.state") if STATE_FILE_DIR else None
+
+    if not STATE_FILE_DIR:
+        log_error("Warning: Missing MUNIN_PLUGSTATE environment variable. Disabling cache and satsfile.")
+
+    plugin_name: str = list(os.path.split(sys.argv[0]))[1]
+    aspect: str = plugin_name.split('_', 1)[1]
+
+    data: Optional[GPSData] = get_gps_data(STATE_FILE, SATS_FILE, TIMEOUT)
+
+    if len(sys.argv) > 1 and sys.argv[1] == "autoconf":
+        print('yes' if data else 'no')
+        return
+
+    if not data:
+        log_error("Failed to retrieve GPS data within timeout.")
+        sys.exit(1)
+
+    if len(sys.argv) > 1 and sys.argv[1] == "suggest":
+        for aspect in TPV_ASPECTS.keys():
+            print(aspect)
+        for aspect in SKY_ASPECTS.keys():
+            print(aspect)
+        for aspect in SAT_ASPECTS.keys():
+            print(aspect)
+        return
+
+    if not aspect:
+        log_error("Missing aspect")
+        sys.exit(1)
+
+    cfg: Optional[Union[TPVConfig, SkyConfig]] = None
+    if len(sys.argv) > 1 and sys.argv[1] == "config":
+        if aspect in TPV_ASPECTS:
+            cfg = TPV_ASPECTS[aspect]
+        if aspect in SKY_ASPECTS:
+            cfg = SKY_ASPECTS[aspect]
+        elif aspect in SAT_ASPECTS:
+            cfg = SAT_ASPECTS[aspect]
+        else:
+            log_error("Bad aspect")
+            sys.exit(1)
+
+        print(f"graph_title {cfg['title']}")
+        print(f"graph_vlabel {cfg['vlabel']}")
+        print(f"graph_args {cfg['args']}")
+        print(f'graph_category gps')
+
+        if 'fields' in cfg:
+            for field, label, draw in cast(ConfigFieldList, cfg['fields']):
+                print(f"{field}.label {label}")
+                print(f"{field}.draw {draw}")
+        elif 'item' in cfg:
+            for id in sorted(data[cast(str, cfg['item'])]):
+                field = re.sub('[^A-Za-z0-9_]', '_', id)
+                print(f"{field}.label {id}")
+
+        return
+
+    if len(sys.argv) > 1:
+        log_error("Bad argument")
+        sys.exit(1)
+
+    if aspect in TPV_ASPECTS:
+        for field, _, _ in cast(ConfigFieldList, TPV_ASPECTS[aspect]['fields']):
+            print(f"{field}.value {data[field]}")
+    elif aspect in SKY_ASPECTS:
+        for field, _, _ in cast(ConfigFieldList, SKY_ASPECTS[aspect]['fields']):
+            print(f"{field}.value {data[field]}")
+    elif aspect in SAT_ASPECTS:
+        for sat_id, val in data[SAT_ASPECTS[aspect]['item']].items():
+            f: str = re.sub('[^A-Za-z0-9_]', '_', sat_id)
+            print(f"{f}.value {val}")
+    else:
+        print("Bad aspect")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
+

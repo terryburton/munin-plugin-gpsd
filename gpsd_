@@ -339,11 +339,11 @@ def main() -> None:
         log_error("Missing aspect")
         sys.exit(1)
 
-    cfg: Optional[Union[TPVConfig, SkyConfig]] = None
+    cfg: Optional[Union[TPVConfig, SKYConfig, SATConfig]] = None
     if len(sys.argv) > 1 and sys.argv[1] == "config":
         if aspect in TPV_ASPECTS:
             cfg = TPV_ASPECTS[aspect]
-        if aspect in SKY_ASPECTS:
+        elif aspect in SKY_ASPECTS:
             cfg = SKY_ASPECTS[aspect]
         elif aspect in SAT_ASPECTS:
             cfg = SAT_ASPECTS[aspect]

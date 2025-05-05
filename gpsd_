@@ -52,7 +52,7 @@ from gps import gps, WATCH_ENABLE, WATCH_NEWSTYLE  # type: ignore
 ConfigFieldList = List[Tuple[str, str, str]]
 TPVConfig = Dict[str, Union[str, ConfigFieldList]]
 SKYConfig = Dict[str, Union[str, ConfigFieldList]]
-SkyConfig = Dict[str, str]
+SATConfig = Dict[str, str]
 GPSData = Dict[str, Any]
 
 
@@ -129,7 +129,7 @@ SKY_ASPECTS: Dict[str, SKYConfig] = {
     },
 }
 
-SAT_ASPECTS: Dict[str, SkyConfig] = {
+SAT_ASPECTS: Dict[str, SATConfig] = {
     'snr': {
         'title':  'gpsd: Signal to Noise',
         'vlabel': 'SNR',

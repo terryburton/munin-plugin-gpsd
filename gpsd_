@@ -3,7 +3,7 @@
 #  Wildcard-plugin to monitor gpsd attribute values.
 #
 #  To monitor gpsd, link gpsd_<aspect> to this file, where <aspect> is one of
-#  sat, fix, pos, alt, mov, trk, err, snr, az, el
+#  sat, fix, pos, alt, mov, trk, err, dop, snr, az, el
 #
 #  Requires the GPSD Python client library to be available.
 #

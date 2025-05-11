@@ -280,7 +280,7 @@ def get_gps_data(statefile: Optional[str], satsfile: Optional[str], timeout: flo
     if statefile:
         data = read_cache(statefile)
         if data:
-            return data;
+            return data
 
     known_satellites: Optional[Set[str]] = read_sats(satsfile) if satsfile else None
 

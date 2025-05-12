@@ -67,7 +67,7 @@ The following describes a known-working setup.
 
 **DollaTek Waterproof GPS Active Antenna 28dB**  
 <https://www.amazon.co.uk/dp/B07DJ3ZQM1>  
-- Replaced stock antenna, providing >10dB additional gain.  
+- Replaced stock antenna, providing >15dB additional gain.  
 - Works indoors including away from windows.  
 - Works flawlessly and never loses fix.
 

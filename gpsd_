@@ -41,7 +41,7 @@ import sys
 import pickle
 import time
 import re
-from typing import Any, Dict, List, Optional, Set, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, Set, Tuple, Union, Callable, cast
 from gps import gps, WATCH_ENABLE, WATCH_NEWSTYLE  # type: ignore
 
 
@@ -361,7 +361,8 @@ def main() -> None:
                 print(f"{field}.label {label}")
                 print(f"{field}.draw {draw}")
         elif 'item' in cfg:
-            for id in sorted(data[cast(str, cfg['item'])]):
+            natsort: Callable[[str], List[Union[int, str]]] = lambda s: [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', s)]
+            for id in sorted(data[cast(str, cfg['item'])], key = natsort):
                 field = re.sub('[^A-Za-z0-9_]', '_', id)
                 print(f"{field}.label {id}")
 

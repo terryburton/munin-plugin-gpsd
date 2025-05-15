@@ -1,46 +1,51 @@
 #!/usr/bin/env python3
-#
-#  Wildcard-plugin to monitor gpsd attribute values.
-#
-#  To monitor gpsd, link gpsd_<aspect> to this file, where <aspect> is one of
-#  sat, fix, pos, alt, mov, trk, err, dop, snr, az, el
-#
-#  Requires the GPSD Python client library to be available.
-#
-#  Releases:
-#
-#    2025-04-30 - Initial
-#    2025-05-02 - Added SNR graph
-#    2025-05-03 - Added azimuth and elevation graphs
-#    2025-05-05 - Refactored and added type declarations
-#
-#
-#  Copyright (c) 2025 Terry Burton <tez@terryburton.co.uk>
-#
-#  Licensed under the Apache License, Version 2.0 (the "License"); you may not
-#  use this file except in compliance with the License.  You may obtain a copy
-#  of the License at
-#
-#      http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
-#  WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
-#  License for the specific language governing permissions and limitations
-#  under the License.
-#
-#
-#  Magic markers
-#   #%# capabilities=autoconf suggest
-#   #%# family=auto
-#
 
+"""
+Wildcard-plugin to monitor gpsd attribute values.
+
+To monitor gpsd, link gpsd_<aspect> to this file, where <aspect> is one of
+sat, fix, pos, alt, mov, trk, err, dop, snr, az, el
+
+Requires the GPSD Python client library to be available.
+
+Releases:
+
+  2025-04-30 - Initial
+  2025-05-02 - Added SNR graph
+  2025-05-03 - Added azimuth and elevation graphs
+  2025-05-05 - Refactored and added type declarations
+  2025-05-15 - Rearrangement to satisfy pylint
+
+
+Copyright (c) 2025 Terry Burton <tez@terryburton.co.uk>
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not
+use this file except in compliance with the License.  You may obtain a copy
+of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+License for the specific language governing permissions and limitations
+under the License.
+
+
+Magic markers
+ #%# capabilities=autoconf suggest
+ #%# family=auto
+"""
+
+
+import json
 import os
+import pickle
+import re
+import socket
 import stat
 import sys
-import pickle
 import time
-import re
 from typing import Any, Dict, List, Optional, Set, Tuple, Union, Callable, cast
 from gps import gps, WATCH_ENABLE, WATCH_NEWSTYLE  # type: ignore
 
@@ -150,9 +155,20 @@ SAT_ASPECTS: Dict[str, SATConfig] = {
     },
 }
 
-TPV_FIELDS: List[str] = [ f for cfg in TPV_ASPECTS.values() for f, _, _ in cast(ConfigFieldList, cfg['fields']) if f not in ('seen', 'used') ]
-SKY_FIELDS: List[str] = [ f for cfg in SKY_ASPECTS.values() for f, _, _ in cast(ConfigFieldList, cfg['fields']) ]
-SAT_FIELDS: List[str] = [ cfg['item'] for cfg in SAT_ASPECTS.values() ]
+TPV_FIELDS: List[str] = [
+    f for cfg in TPV_ASPECTS.values()
+    for f, _, _ in cast(ConfigFieldList, cfg['fields'])
+    if f not in ('seen', 'used')
+]
+
+SKY_FIELDS: List[str] = [
+    f for cfg in SKY_ASPECTS.values()
+    for f, _, _ in cast(ConfigFieldList, cfg['fields'])
+]
+
+SAT_FIELDS: List[str] = [
+    cfg['item'] for cfg in SAT_ASPECTS.values()
+]
 
 
 #
@@ -160,12 +176,41 @@ SAT_FIELDS: List[str] = [ cfg['item'] for cfg in SAT_ASPECTS.values() ]
 #
 
 def log_error(msg: str) -> None:
+    """Outputs given error message"""
     print(msg, file=sys.stderr)
+
+
+def process_tpv(data: GPSData, report: Dict[str, Any]) -> None:
+    """Process a TPV report"""
+    for field in TPV_FIELDS:
+        data[field] = getattr(report, field, None)
+
+
+def process_sky(data: GPSData, report: Dict[str, Any], known_satellites: Set[str]) -> None:
+    """Process a SKY report"""
+    if hasattr(report, 'satellites'):
+        data['seen'] = data['used'] = 0
+        for field in SKY_FIELDS:
+            data[field] = getattr(report, field, None)
+        for field in SAT_FIELDS:
+            data[field] = { sat: "U" for sat in known_satellites or [] }
+        for sat in report.satellites:
+            data['seen'] += 1
+            data['used'] += 1 if getattr(sat, 'used', False) else 0
+            gnssid: Optional[int] = getattr(sat, 'gnssid', None)
+            svid: Optional[int] = getattr(sat, 'svid', None)
+            if gnssid is not None and svid is not None:
+                sat_id: str = ID_MAP.get(gnssid, '_') + f" {svid}"
+                for field in SAT_FIELDS:
+                    value: Optional[float] = getattr(sat, field, None)
+                    data[field][sat_id] = value if value and value > 0 else "U"
+
 
 #
 #  Generally gpsd will report data once per second
 #
 def read_gps(known_satellites: Set[str], timeout: float) -> Optional[GPSData]:
+    """Connect to gpsd and attempt to read data"""
     session = gps(mode=WATCH_ENABLE | WATCH_NEWSTYLE)
     start_time: float = time.time()
     data: GPSData = {}
@@ -175,29 +220,11 @@ def read_gps(known_satellites: Set[str], timeout: float) -> Optional[GPSData]:
     while time.time() - start_time < timeout:
         try:
             report: Dict[str, Any] = session.next()
-
             if report['class'] == 'TPV':
-                for field in TPV_FIELDS:
-                    data[field] = getattr(report, field, None)
+                process_tpv(data, report)
                 tpv_received = True
-
             elif report['class'] == 'SKY':
-                if hasattr(report, 'satellites'):
-                    data['seen'] = data['used'] = 0
-                    for field in SKY_FIELDS:
-                        data[field] = getattr(report, field, None)
-                    for field in SAT_FIELDS:
-                        data[field] = { sat: "U" for sat in known_satellites or [] }
-                    for sat in report.satellites:
-                        data['seen'] += 1
-                        data['used'] += 1 if getattr(sat, 'used', False) else 0
-                        gnssid: Optional[int] = getattr(sat, 'gnssid', None)
-                        svid: Optional[int] = getattr(sat, 'svid', None)
-                        if gnssid is not None and svid is not None:
-                            id: str = ID_MAP.get(gnssid, '_') + f" {svid}"
-                            for field in SAT_FIELDS:
-                                value: Optional[float] = getattr(sat, field, None)
-                                data[field][id] = value if value and value > 0 else "U"
+                process_sky(data, report, known_satellites)
                 sky_received = True
 
             #
@@ -208,8 +235,10 @@ def read_gps(known_satellites: Set[str], timeout: float) -> Optional[GPSData]:
 
         except (StopIteration, KeyError):
             pass
-        except Exception as e:
-            log_error(f"Error reading GPS data: {e}")
+        except (json.JSONDecodeError, ValueError) as err:
+            log_error(f"Malformed data: {err}")
+        except (OSError, socket.error) as err:
+            log_error(f"Error reading GPS data: {err}")
             break
 
         #
@@ -224,6 +253,7 @@ def read_gps(known_satellites: Set[str], timeout: float) -> Optional[GPSData]:
 
 
 def read_cache(statefile: str) -> Optional[GPSData]:
+    """Return data from a fresh cache file"""
 
     #
     #  Ignore existing state if it is missing or too old
@@ -232,145 +262,139 @@ def read_cache(statefile: str) -> Optional[GPSData]:
         return None
 
     try:
-        with open(statefile, "rb") as fh:
-            return cast(GPSData, pickle.load(fh))
-    except Exception as e:
-        log_error(f"Error opening statefile '{statefile}': {e}")
+        with open(statefile, "rb") as file:
+            return cast(GPSData, pickle.load(file))
+    except (FileNotFoundError, EOFError, pickle.UnpicklingError, OSError) as err:
+        log_error(f"Error opening statefile '{statefile}': {err}")
 
     return None
 
 
 def update_cache(statefile: str, data: GPSData) -> None:
+    """Freshen the cache file"""
 
     try:
-        with open(statefile, "wb") as fh:
-            pickle.dump(data, fh)
-    except Exception as e:
-        log_error(f"Error updating statefile '{statefile}': {e}")
+        with open(statefile, "wb") as file:
+            pickle.dump(data, file)
+    except (OSError, pickle.PicklingError, TypeError) as err:
+        log_error(f"Error updating statefile '{statefile}': {err}")
 
 
 def read_sats(satsfile: str) -> Optional[Set[str]]:
+    """Read the list of known satellites"""
 
     if not os.path.isfile(satsfile):
         return set()
 
     try:
-        with open(satsfile, "rb") as fh:
-            return cast(Set[str], pickle.load(fh))
-    except Exception as e:
-        log_error(f"Error opening satsfile '{satsfile}': {e}")
+        with open(satsfile, "rb") as file:
+            return cast(Set[str], pickle.load(file))
+    except (FileNotFoundError, EOFError, pickle.UnpicklingError, OSError) as err:
+        log_error(f"Error opening satsfile '{satsfile}': {err}")
 
     return None
 
 
 def update_sats(satsfile: str, sats: Set[str]) -> None:
+    """Update the list of known satellites"""
 
     try:
         tmpfile: str = satsfile + ".tmp"
-        with open(tmpfile, "wb") as fh:
-            pickle.dump(sats, fh)
+        with open(tmpfile, "wb") as file:
+            pickle.dump(sats, file)
         os.replace(tmpfile, satsfile)
-    except Exception as e:
-        log_error(f"Error updating satsfile '{satsfile}': {e}")
+    except (OSError, pickle.PicklingError, TypeError) as err:
+        log_error(f"Error updating satsfile '{satsfile}': {err}")
 
 
-def get_gps_data(statefile: Optional[str], satsfile: Optional[str], timeout: float) -> Optional[GPSData]:
+def get_gps_data() -> Optional[GPSData]:
+    """Fetch gps data from either the cache or gpsd"""
+
+    timeout: float = float(os.environ.get("GPSD_TIMEOUT", 2))
+
+    state_file_dir: Optional[str] = os.environ.get('MUNIN_PLUGSTATE', None)
+
+    state_file: Optional[str] = (
+        os.path.join(state_file_dir, "gpsd.state")
+        if state_file_dir else None
+    )
+
+    sats_file: Optional[str] = (
+        os.path.join(state_file_dir, "gpsd_sats.state")
+        if state_file_dir else None
+    )
+
+    if not state_file_dir:
+        log_error(
+            "Warning: Missing MUNIN_PLUGSTATE environment variable.\n"
+            "Disabling cache and satsfile."
+        )
 
     data: Optional[GPSData] = None
-    if statefile:
-        data = read_cache(statefile)
+    if state_file:
+        data = read_cache(state_file)
         if data:
             return data
 
-    known_satellites: Optional[Set[str]] = read_sats(satsfile) if satsfile else None
+    known_satellites: Optional[Set[str]] = read_sats(sats_file) if sats_file else None
 
     data = read_gps(known_satellites or set(), timeout)
 
-    if satsfile is not None and known_satellites is not None and data is not None:
+    if sats_file is not None and known_satellites is not None and data is not None:
         known_satellites.update(data['ss'].keys())
-        update_sats(satsfile, known_satellites)
+        update_sats(sats_file, known_satellites)
 
-    if statefile and data:
-        update_cache(statefile, data)
+    if state_file and data:
+        update_cache(state_file, data)
 
     return data
 
 
-##########
-#  Main  #
-##########
+def suggest() -> None:
+    """munin suggest action"""
+    for aspect in TPV_ASPECTS:
+        print(aspect)
+    for aspect in SKY_ASPECTS:
+        print(aspect)
+    for aspect in SAT_ASPECTS:
+        print(aspect)
 
-def main() -> None:
 
-    #
-    #  Environment
-    #
-    TIMEOUT: float = float(os.environ.get("GPSD_TIMEOUT", 2))
-    STATE_FILE_DIR: Optional[str] = os.environ.get('MUNIN_PLUGSTATE', None)
-    STATE_FILE: Optional[str] = os.path.join(STATE_FILE_DIR, "gpsd.state") if STATE_FILE_DIR else None
-    SATS_FILE: Optional[str] = os.path.join(STATE_FILE_DIR, "gpsd_sats.state") if STATE_FILE_DIR else None
-
-    if not STATE_FILE_DIR:
-        log_error("Warning: Missing MUNIN_PLUGSTATE environment variable. Disabling cache and satsfile.")
-
-    plugin_name: str = list(os.path.split(sys.argv[0]))[1]
-    aspect: str = plugin_name.split('_', 1)[1]
-
-    data: Optional[GPSData] = get_gps_data(STATE_FILE, SATS_FILE, TIMEOUT)
-
-    if len(sys.argv) > 1 and sys.argv[1] == "autoconf":
-        print('yes' if data else 'no')
-        return
-
-    if not data:
-        log_error("Failed to retrieve GPS data within timeout.")
-        sys.exit(1)
-
-    if len(sys.argv) > 1 and sys.argv[1] == "suggest":
-        for aspect in TPV_ASPECTS.keys():
-            print(aspect)
-        for aspect in SKY_ASPECTS.keys():
-            print(aspect)
-        for aspect in SAT_ASPECTS.keys():
-            print(aspect)
-        return
-
-    if not aspect:
-        log_error("Missing aspect")
-        sys.exit(1)
-
+def config(aspect: str, data: GPSData) -> bool:
+    """munin config action"""
     cfg: Optional[Union[TPVConfig, SKYConfig, SATConfig]] = None
-    if len(sys.argv) > 1 and sys.argv[1] == "config":
-        if aspect in TPV_ASPECTS:
-            cfg = TPV_ASPECTS[aspect]
-        elif aspect in SKY_ASPECTS:
-            cfg = SKY_ASPECTS[aspect]
-        elif aspect in SAT_ASPECTS:
-            cfg = SAT_ASPECTS[aspect]
-        else:
-            log_error("Bad aspect")
-            sys.exit(1)
+    if aspect in TPV_ASPECTS:
+        cfg = TPV_ASPECTS[aspect]
+    elif aspect in SKY_ASPECTS:
+        cfg = SKY_ASPECTS[aspect]
+    elif aspect in SAT_ASPECTS:
+        cfg = SAT_ASPECTS[aspect]
+    else:
+        log_error("Bad aspect")
+        return False
 
-        print(f"graph_title {cfg['title']}")
-        print(f"graph_vlabel {cfg['vlabel']}")
-        print(f"graph_args {cfg['args']}")
-        print(f'graph_category gps')
+    print(f"graph_title {cfg['title']}")
+    print(f"graph_vlabel {cfg['vlabel']}")
+    print(f"graph_args {cfg['args']}")
+    print('graph_category gps')
 
-        if 'fields' in cfg:
-            for field, label, draw in cast(ConfigFieldList, cfg['fields']):
-                print(f"{field}.label {label}")
-                print(f"{field}.draw {draw}")
-        elif 'item' in cfg:
-            natsort: Callable[[str], List[Union[int, str]]] = lambda s: [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', s)]
-            for id in sorted(data[cast(str, cfg['item'])], key = natsort):
-                field = re.sub('[^A-Za-z0-9_]', '_', id)
-                print(f"{field}.label {id}")
+    if 'fields' in cfg:
+        for field, label, draw in cast(ConfigFieldList, cfg['fields']):
+            print(f"{field}.label {label}")
+            print(f"{field}.draw {draw}")
+    elif 'item' in cfg:
+        natsort: Callable[[str], List[Union[int, str]]] = lambda s: [
+            int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', s)
+        ]
+        for sat_id in sorted(data[cast(str, cfg['item'])], key = natsort):
+            field = re.sub('[^A-Za-z0-9_]', '_', sat_id)
+            print(f"{field}.label {sat_id}")
 
-        return
+    return True
 
-    if len(sys.argv) > 1:
-        log_error("Bad argument")
-        sys.exit(1)
+
+def fetch(aspect: str, data: GPSData) -> bool:
+    """munin default action"""
 
     if aspect in TPV_ASPECTS:
         for field, _, _ in cast(ConfigFieldList, TPV_ASPECTS[aspect]['fields']):
@@ -380,13 +404,47 @@ def main() -> None:
             print(f"{field}.value {data[field]}")
     elif aspect in SAT_ASPECTS:
         for sat_id, val in data[SAT_ASPECTS[aspect]['item']].items():
-            f: str = re.sub('[^A-Za-z0-9_]', '_', sat_id)
-            print(f"{f}.value {val}")
+            attr: str = re.sub('[^A-Za-z0-9_]', '_', sat_id)
+            print(f"{attr}.value {val}")
     else:
         print("Bad aspect")
+        return False
+    return True
+
+
+def main() -> None:
+    """Launched as a munin plugin or by munin-run"""
+
+    data: Optional[GPSData] = get_gps_data()
+    if not data:
+        log_error("Failed to retrieve GPS data within timeout.")
+        sys.exit(1)
+
+    if len(sys.argv) > 1 and sys.argv[1] == "autoconf":
+        print('yes' if data else 'no')
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "suggest":
+        suggest()
+        return
+
+    aspect: str = list(os.path.split(sys.argv[0]))[1].split('_', 1)[1]
+    if not aspect:
+        log_error("Missing aspect")
+        sys.exit(1)
+
+    if len(sys.argv) > 1 and sys.argv[1] == "config":
+        if not config(aspect, data):
+            sys.exit(1)
+        return
+
+    if len(sys.argv) > 1:
+        log_error("Bad argument")
+        sys.exit(1)
+
+    if not fetch(aspect, data):
         sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
-

@@ -96,3 +96,14 @@ The following describes a known-working setup.
   refclock shm unit 1 prefer minpoll 0 refid PPS
   ```
 - `time1` adjustment set based on delay reported by `TOFF` output of `gpsmon`.
+
+---
+
+**Public NTP service**
+
+I provide NTS-enabled NTP server instances at:
+
+  - ntp1.dmz.terryburton.co.uk
+  - ntp2.dmz.terryburton.co.uk
+
+Certbot is used to generate the certificates. The Debian NTPsec packages include a deploy hook for Certbot that will handle copying and permissioning the certificate and key files, which can be enabled by setting `NTPSEC_CERTBOT_CERT_NAME` in `/etc/default/ntpsec`.

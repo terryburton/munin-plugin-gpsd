@@ -15,6 +15,7 @@ Releases:
   2025-05-03 - Added azimuth and elevation graphs
   2025-05-05 - Refactored and added type declarations
   2025-05-15 - Rearrangement to satisfy pylint
+  2025-06-18 - Load graph options from structured const data
 
 
 Copyright (c) 2025 Terry Burton <tez@terryburton.co.uk>
@@ -54,10 +55,11 @@ from gps import gps, WATCH_ENABLE, WATCH_NEWSTYLE  # type: ignore
 #  Type aliases
 #
 
+GraphConfig = Dict[str, str]
 ConfigFieldList = List[Tuple[str, str, str]]
-TPVConfig = Dict[str, Union[str, ConfigFieldList]]
-SKYConfig = Dict[str, Union[str, ConfigFieldList]]
-SATConfig = Dict[str, str]
+TPVConfig = Dict[str, Union[GraphConfig, ConfigFieldList]]
+SKYConfig = Dict[str, Union[GraphConfig, ConfigFieldList]]
+SATConfig = Dict[str, Union[GraphConfig, str]]
 GPSData = Dict[str, Any]
 
 
@@ -69,45 +71,67 @@ ID_MAP: Dict[int, str] = { 0: 'GP', 1: 'SB', 2: 'GA', 3: 'BD', 4: 'IM', 5: 'QZ',
 
 TPV_ASPECTS: Dict[str, TPVConfig] = {
     'sat': {
-        'title':  'gpsd: Satellites',
-        'vlabel': 'Number of satellites',
-        'args':   '--base 1000 --lower-limit 0',
+        'graph': {
+            'category': 'gps',
+            'title':    'gpsd: Satellites',
+            'vlabel':   'Number of satellites',
+            'args':      '--base 1000 --lower-limit 0',
+        },
         'fields': [('seen', 'Seen', 'AREA'), ('used', 'Used', 'AREA')],
     },
     'fix': {
-        'title':  'gpsd: Fix mode',
-        'vlabel': 'Mode',
-        'args':   '--base 1000 --lower-limit 0',
+        'graph': {
+            'category': 'gps',
+            'title':    'gpsd: Fix mode',
+            'vlabel':   'Mode',
+            'args':     '--base 1000 --lower-limit 0',
+        },
         'fields': [('mode', 'Fix mode (1 = No fix; 2 = 2D; 3 = 3D)', 'AREA')],
     },
     'pos': {
-        'title':  'gpsd: Location',
-        'vlabel': 'Lat/lon (degrees)',
-        'args':   '--base 1000 --lower-limit -180 --upper-limit 180 --rigid',
+        'graph': {
+            'category':     'gps',
+            'title':        'gpsd: Location',
+            'vlabel':       'Lat/lon (degrees)',
+            'args':         '--base 1000 --lower-limit -180 --upper-limit 180 --rigid',
+            'printf':       '%.7lf',
+        },
         'fields': [('lat', 'Latitude', 'LINE1'), ('lon', 'Longitude', 'LINE1')],
     },
     'alt': {
-        'title':  'gpsd: Altitude',
-        'vlabel': 'Altitude (m)',
-        'args':   '--base 1000',
+        'graph': {
+            'category': 'gps',
+            'title':    'gpsd: Altitude',
+            'vlabel':   'Altitude (m)',
+            'args':     '--base 1000',
+        },
         'fields': [('alt', 'Altitude', 'LINE1')],
     },
     'mov': {
-        'title':  'gpsd: Movement',
-        'vlabel': 'Rate (m/s)',
-        'args':   '--base 1000',
+        'graph': {
+            'category': 'gps',
+            'title':    'gpsd: Movement',
+            'vlabel':   'Rate (m/s)',
+            'args':     '--base 1000',
+        },
         'fields': [('speed', 'Speed', 'LINE1'), ('climb', 'Climb', 'LINE1')],
     },
     'trk': {
-        'title':  'gpsd: Track',
-        'vlabel': 'Heading (degrees)',
-        'args':   '--base 1000 --lower-limit 0 --upper-limit 360 --rigid',
+        'graph': {
+            'category': 'gps',
+            'title':    'gpsd: Track',
+            'vlabel':   'Heading (degrees)',
+            'args':     '--base 1000 --lower-limit 0 --upper-limit 360 --rigid',
+        },
         'fields': [('track', 'Track', 'LINE1')],
     },
     'err': {
-        'title':  'gpsd: Errors',
-        'vlabel': 'Error',
-        'args':   '--base 1000 --lower-limit 0',
+        'graph': {
+            'category': 'gps',
+            'title':    'gpsd: Errors',
+            'vlabel':   'Error',
+            'args':     '--base 1000 --lower-limit 0',
+        },
         'fields': [
             ('epy', 'Latitude error (m)', 'LINE1'),
             ('epx', 'Longitude error (m)', 'LINE1'),
@@ -119,9 +143,12 @@ TPV_ASPECTS: Dict[str, TPVConfig] = {
 
 SKY_ASPECTS: Dict[str, SKYConfig] = {
     'dop': {
-        'title':  'gpsd: Dilution of precision',
-        'vlabel': 'Dilution of precision',
-        'args':   '--base 1000 --lower-limit 0',
+        'graph': {
+            'category': 'gps',
+            'title':    'gpsd: Dilution of precision',
+            'vlabel':   'Dilution of precision',
+            'args':     '--base 1000 --lower-limit 0',
+        },
         'fields': [
             ('ydop', 'Latitudinal', 'LINE1'),
             ('xdop', 'Longitudinal', 'LINE1'),
@@ -136,22 +163,31 @@ SKY_ASPECTS: Dict[str, SKYConfig] = {
 
 SAT_ASPECTS: Dict[str, SATConfig] = {
     'snr': {
-        'title':  'gpsd: Signal to Noise',
-        'vlabel': 'SNR',
-        'args':   '--base 1000 --lower-limit 0',
-        'item':   'ss',
+        'graph': {
+            'category': 'gps',
+            'title':    'gpsd: Signal to Noise',
+            'vlabel':   'SNR',
+            'args':     '--base 1000 --lower-limit 0',
+        },
+        'item': 'ss',
     },
     'az': {
-        'title':  'gpsd: Azimuth',
-        'vlabel': 'Azimuth (degrees)',
-        'args':   '--base 1000 --lower-limit 0 --upper-limit 360 --rigid',
-        'item':   'az',
+        'graph': {
+            'category': 'gps',
+            'title':    'gpsd: Azimuth',
+            'vlabel':   'Azimuth (degrees)',
+            'args':     '--base 1000 --lower-limit 0 --upper-limit 360 --rigid',
+        },
+        'item': 'az',
     },
     'el': {
-        'title':  'gpsd: Elevation',
-        'vlabel': 'Elevation (degrees)',
-        'args':   '--base 1000 --lower-limit 0 --upper-limit 90 --rigid',
-        'item':   'el',
+        'graph': {
+            'category': 'gps',
+            'title':    'gpsd: Elevation',
+            'vlabel':   'Elevation (degrees)',
+            'args':     '--base 1000 --lower-limit 0 --upper-limit 90 --rigid',
+        },
+        'item': 'el',
     },
 }
 
@@ -167,7 +203,7 @@ SKY_FIELDS: List[str] = [
 ]
 
 SAT_FIELDS: List[str] = [
-    cfg['item'] for cfg in SAT_ASPECTS.values()
+    cast(str, cfg['item']) for cfg in SAT_ASPECTS.values()
 ]
 
 
@@ -373,10 +409,8 @@ def config(aspect: str, data: GPSData) -> bool:
         log_error("Bad aspect")
         return False
 
-    print(f"graph_title {cfg['title']}")
-    print(f"graph_vlabel {cfg['vlabel']}")
-    print(f"graph_args {cfg['args']}")
-    print('graph_category gps')
+    for conf, value in cast(GraphConfig, cfg['graph']).items():
+        print(f"graph_{conf} {value}")
 
     if 'fields' in cfg:
         for field, label, draw in cast(ConfigFieldList, cfg['fields']):
@@ -403,7 +437,7 @@ def fetch(aspect: str, data: GPSData) -> bool:
         for field, _, _ in cast(ConfigFieldList, SKY_ASPECTS[aspect]['fields']):
             print(f"{field}.value {data[field]}")
     elif aspect in SAT_ASPECTS:
-        for sat_id, val in data[SAT_ASPECTS[aspect]['item']].items():
+        for sat_id, val in data[cast(str, SAT_ASPECTS[aspect]['item'])].items():
             attr: str = re.sub('[^A-Za-z0-9_]', '_', sat_id)
             print(f"{attr}.value {val}")
     else:
